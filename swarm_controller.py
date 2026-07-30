@@ -8,22 +8,16 @@ from pymavlink import mavutil
 import paho.mqtt.client as mqtt
 import time
 import threading
+import sys # EKLENDI: Terminalden parametre (D1, D2) alabilmek icin
 
 # MQTT
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
 MQTT_TOPIC = "cezeri/drone/komut"
 
-BAUD_RATE= 57600 
+BAUD_RATE = 57600 
 
-# Bağlantı için 3 ayrı port
-DRONE_PORTS = [
-    '/dev/ttyACM0', # 1. Drone
-    '/dev/ttyACM1', # 2. Drone
-    '/dev/ttyACM2'  # 3. Drone
-]
-
-# TEKİL DRONE SINIFI 
+# TEKİL DRONE SINIFI (Değişiklik yapılmadı)
 class SingleDrone:
     def __init__(self, connection_string, drone_id):
         self.id = drone_id
@@ -93,92 +87,72 @@ class SingleDrone:
         print(f"[Drone {self.id}] MOVE uygulandi: X:{x}, Y:{y}, Z:{z}")
 
 
-# SÜRÜ KONTROL SINIFI 
+# SÜRÜ KONTROL SINIFI (Dağıtık mimariye göre güncellendi)
 class SwarmController:
-    def __init__(self, connection_strings):
-        print("SURU BASLATILIYOR")
-        self.drones = [] #boş bir drone listesi
-        for i, conn in enumerate(connection_strings):
-            self.drones.append(SingleDrone(conn, drone_id=i+1)) #drone'ları portlara bağlıyoruz
-        print("TUM SURU BAGLANTILARI KURULDU")
+    def __init__(self, connection_string, my_id):
+        self.my_id = my_id
+        print(f"[{self.my_id}] SİSTEMİ BAŞLATILIYOR")
         
-        # MQTT İstemcisini sınıfın bir parçası yapıyoruz
+        # Her Pi sadece kendi altındaki uçuş kartına bağlanır
+        self.drone = SingleDrone(connection_string, drone_id=self.my_id) 
+        print(f"[{self.my_id}] BAĞLANTI KURULDU")
+        
+        # MQTT İstemcisi
         self.mqtt_client = mqtt.Client()
         self.mqtt_client.on_connect = self.on_connect
         self.mqtt_client.on_message = self.on_message
         
         self.mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
         
-    def execute_on_all(self, command_func, *args):
-        threads = []
-        for drone in self.drones:
-            t = threading.Thread(target=command_func, args=(drone,) + args)
-            t.daemon = True
-            threads.append(t)
-            t.start()
-            
-        for t in threads:
-            t.join()
-
-    # MQTT fonksiyonları artık sınıfın (self) yeteneklerine sahip
     def on_connect(self, client, userdata, flags, rc):
         print("MQTT Broker'a baglanildi. Arayuzden (GUI) komut bekleniyor")
         client.subscribe(MQTT_TOPIC)
 
     def on_message(self, client, userdata, msg):
         gelen_mesaj = msg.payload.decode("utf-8")
-        print(f"[MQTT ALINDI] {gelen_mesaj}")
         
         parcalar = gelen_mesaj.split(":")
         hedef = parcalar[0]
         komut = parcalar[1]
         
-        hedef_dronelar = []
-        
-        #self.drones listesindeki nesneleri eşleştiriyoruz
-        if hedef == "ALL":
-            hedef_dronelar = self.drones
-        elif hedef == "D1" and len(self.drones) >= 1:
-            hedef_dronelar = [self.drones[0]]
-        elif hedef == "D2" and len(self.drones) >= 2:
-            hedef_dronelar = [self.drones[1]]
-        elif hedef == "D3" and len(self.drones) >= 3:
-            hedef_dronelar = [self.drones[2]]
-        else:
-            print("Geçersiz Hedef ID veya Drone bulunamadi!")
+        # EKLENDİ: Gelen komut bana ait değilse veya herkese (ALL) atılmadıysa hiç işlem yapma!
+        if hedef != self.my_id and hedef != "ALL":
             return
-
-        # Seçilen drone'lar için oluşturulan MAVLink fonksiyonlarını tetikliyoruz
-        for drone in hedef_dronelar:
-            if komut == "ARM":
-                drone.arm() 
-                print(f"{drone.id} için ARM tetiklendi.")
+            
+        print(f"[MQTT ALINDI] {gelen_mesaj}")
+        
+        # Hedeflenen komutları sadece kendi drone'umuza uyguluyoruz
+        drone = self.drone
+        
+        if komut == "ARM":
+            drone.arm() 
+            print(f"{drone.id} için ARM tetiklendi.")
+            
+        elif komut == "TAKEOFF":
+            drone.takeoff(10) # Kalkış irtifası 10 metre
+            print(f"{drone.id} için TAKEOFF tetiklendi.")
+            
+        elif komut == "LAND":
+            drone.land()
+            print(f"{drone.id} için LAND tetiklendi.")
+            
+        elif komut == "DISARM":
+            drone.disarm() 
+            print(f"{drone.id} için DISARM tetiklendi.")
+            
+        elif komut == "FORCE_DISARM":
+            drone.force_disarm() 
+            print(f"{drone.id} için FORCE_DISARM tetiklendi.")
+            
+        elif komut == "MOVE":
+            if len(parcalar) == 3:
+                koordinatlar = parcalar[2].split(",")
+                x = float(koordinatlar[0])
+                y = float(koordinatlar[1])
+                z = float(koordinatlar[2])
                 
-            elif komut == "TAKEOFF":
-                drone.takeoff(10) # Kalkış irtifası 10 metre
-                print(f"{drone.id} için TAKEOFF tetiklendi.")
-                
-            elif komut == "LAND":
-                drone.land()
-                print(f"{drone.id} için LAND tetiklendi.")
-                
-            elif komut == "DISARM":
-                drone.disarm() 
-                print(f"{drone.id} için DISARM tetiklendi.")
-                
-            elif komut == "FORCE_DISARM":
-                drone.force_disarm() 
-                print(f"{drone.id} için FORCE_DISARM tetiklendi.")
-                
-            elif komut == "MOVE":
-                if len(parcalar) == 3:
-                    koordinatlar = parcalar[2].split(",")
-                    x = float(koordinatlar[0])
-                    y = float(koordinatlar[1])
-                    z = float(koordinatlar[2])
-                    
-                    drone.move_local(x, y, z)
-                    print(f"{drone.id} MOVE -> X:{x} Y:{y} Z:{z}")
+                drone.move_local(x, y, z)
+                print(f"{drone.id} MOVE -> X:{x} Y:{y} Z:{z}")
 
     def baslat(self):
         try:
@@ -187,10 +161,19 @@ class SwarmController:
             print("\nSistem manuel olarak kapatildi.")
 
 
-#  ANA ÇALIŞTIRMA BLOĞU 
-if __name__ == "__main__": #Güvenlik
-    # 1. Sürüyü ve bağlantıları kur
-    swarm = SwarmController(DRONE_PORTS)
+# ANA ÇALIŞTIRMA BLOĞU (Güncellendi)
+if __name__ == "__main__": 
+    # Terminalden girilen ID'yi alıyoruz (Örn: python3 swarm_controller.py D1)
+    if len(sys.argv) > 1:
+        cihaz_kimligi = sys.argv[1].upper() # D1, d1 girilse bile büyütür
+    else:
+        cihaz_kimligi = "D1" # Unutulursa varsayılan D1
+
+    # Her cihazda tek bağlantı noktası var
+    kullanilacak_port = '/dev/ttyACM0'
+    
+    # 1. Sistemi belirtilen kimlik ile kur
+    swarm = SwarmController(kullanilacak_port, my_id=cihaz_kimligi)
     
     # 2. Sistemi başlat ve dinlemeye geç
     swarm.baslat()
